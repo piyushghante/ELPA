@@ -1,23 +1,75 @@
 import streamlit as st
-from sqlalchemy import create_engine, text
 import pandas as pd
 
+from datetime import date, datetime
+from decimal import Decimal
 
-# --------------------------------------------------
-# Page configuration
-# --------------------------------------------------
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
+
+
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
-    page_title="Loan Management",
+    page_title="Loan Manager",
     page_icon="💰",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 
-# --------------------------------------------------
-# Database connection
-# --------------------------------------------------
+# ============================================================
+# CUSTOM CSS - MOBILE FRIENDLY
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+        .block-container {
+            padding-top: 1rem;
+            padding-left: 1rem;
+            padding-right: 1rem;
+            max-width: 1200px;
+        }
+
+        .loan-card {
+            padding: 1rem;
+            border-radius: 12px;
+            border: 1px solid rgba(128,128,128,0.25);
+            margin-bottom: 1rem;
+        }
+
+        .amount {
+            font-size: 1.7rem;
+            font-weight: 700;
+        }
+
+        .small-text {
+            font-size: 0.85rem;
+            opacity: 0.7;
+        }
+
+        div[data-testid="stMetric"] {
+            padding: 0.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .block-container {
+                padding-left: 0.7rem;
+                padding-right: 0.7rem;
+            }
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# DATABASE
+# ============================================================
 
 @st.cache_resource
 def get_database_engine():
@@ -26,27 +78,32 @@ def get_database_engine():
     return create_engine(
         database_url,
         pool_pre_ping=True,
+        pool_recycle=300,
     )
 
 
-engine = get_database_engine()
+try:
+    engine = get_database_engine()
+    database_available = True
+except Exception as error:
+    database_available = False
+    st.error("Unable to initialize database connection.")
+    st.exception(error)
 
 
-# --------------------------------------------------
-# Database helper
-# --------------------------------------------------
+# ============================================================
+# DATABASE HELPERS
+# ============================================================
 
-def execute_query(query: str, params: dict | None = None):
+def execute_query(query, params=None):
     with engine.begin() as connection:
-        result = connection.execute(
+        return connection.execute(
             text(query),
             params or {},
         )
 
-        return result
 
-
-def read_query(query: str, params: dict | None = None):
+def read_query(query, params=None):
     with engine.connect() as connection:
         return pd.read_sql(
             text(query),
@@ -55,293 +112,1172 @@ def read_query(query: str, params: dict | None = None):
         )
 
 
-# --------------------------------------------------
-# Database initialization
-# --------------------------------------------------
+# ============================================================
+# DATABASE INITIALIZATION
+# ============================================================
 
 def initialize_database():
 
-    query = """
-    CREATE TABLE IF NOT EXISTS loans (
-        id SERIAL PRIMARY KEY,
-        loan_name VARCHAR(100) NOT NULL,
-        lender VARCHAR(100),
-        principal_amount NUMERIC(15, 2) NOT NULL,
-        interest_rate NUMERIC(5, 2) NOT NULL,
-        tenure_months INTEGER NOT NULL,
-        start_date DATE NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """
+    # --------------------------------------------------------
+    # USERS
+    # --------------------------------------------------------
 
-    execute_query(query)
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            role VARCHAR(30) NOT NULL,
+            display_name VARCHAR(100) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    # --------------------------------------------------------
+    # LOANS
+    # --------------------------------------------------------
+
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS loans (
+            id SERIAL PRIMARY KEY,
+
+            name VARCHAR(150) NOT NULL,
+
+            loan_type VARCHAR(30) NOT NULL,
+
+            original_amount NUMERIC(15,2) NOT NULL,
+
+            interest_rate NUMERIC(8,4) DEFAULT 0,
+
+            start_date DATE NOT NULL,
+
+            notes TEXT,
+
+            is_active BOOLEAN DEFAULT TRUE,
+
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    # --------------------------------------------------------
+    # PAYMENTS
+    # --------------------------------------------------------
+
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS payments (
+            id SERIAL PRIMARY KEY,
+
+            loan_id INTEGER NOT NULL
+                REFERENCES loans(id),
+
+            amount NUMERIC(15,2) NOT NULL,
+
+            payment_date DATE NOT NULL,
+
+            paid_by VARCHAR(100) NOT NULL,
+
+            status VARCHAR(30) DEFAULT 'pending',
+
+            note TEXT,
+
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    # --------------------------------------------------------
+    # PAYMENT ALLOCATIONS
+    # --------------------------------------------------------
+
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS payment_allocations (
+            id SERIAL PRIMARY KEY,
+
+            payment_id INTEGER UNIQUE NOT NULL
+                REFERENCES payments(id),
+
+            interest_amount NUMERIC(15,2) NOT NULL DEFAULT 0,
+
+            principal_amount NUMERIC(15,2) NOT NULL DEFAULT 0,
+
+            allocated_by VARCHAR(100) NOT NULL,
+
+            allocated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
 
 
-# --------------------------------------------------
-# Initialize
-# --------------------------------------------------
+# ============================================================
+# DEFAULT USERS
+# ============================================================
 
-try:
-    initialize_database()
-    database_connected = True
+def create_default_users():
 
-except Exception as error:
-    database_connected = False
+    users = [
+        {
+            "username": "superuser",
+            "password": "CHANGE_THIS_PASSWORD",
+            "role": "superuser",
+            "display_name": "Me",
+        },
+        {
+            "username": "home",
+            "password": "CHANGE_THIS_PASSWORD",
+            "role": "home",
+            "display_name": "Father",
+        },
+    ]
 
-    st.error("Unable to connect to PostgreSQL.")
-    st.exception(error)
+    for user in users:
+
+        existing = read_query(
+            """
+            SELECT id
+            FROM users
+            WHERE username = :username
+            """,
+            {
+                "username": user["username"]
+            },
+        )
+
+        if existing.empty:
+
+            execute_query(
+                """
+                INSERT INTO users (
+                    username,
+                    password,
+                    role,
+                    display_name
+                )
+                VALUES (
+                    :username,
+                    :password,
+                    :role,
+                    :display_name
+                )
+                """,
+                user,
+            )
 
 
-# --------------------------------------------------
-# Sidebar
-# --------------------------------------------------
+# ============================================================
+# INITIALIZE DATABASE
+# ============================================================
 
-with st.sidebar:
+if database_available:
+
+    try:
+        initialize_database()
+        create_default_users()
+
+    except Exception as error:
+        st.error("Database initialization failed.")
+        st.exception(error)
+        st.stop()
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "username" not in st.session_state:
+    st.session_state.username = None
+
+if "role" not in st.session_state:
+    st.session_state.role = None
+
+if "display_name" not in st.session_state:
+    st.session_state.display_name = None
+
+
+# ============================================================
+# LOGIN
+# ============================================================
+
+def login_user(username, password):
+
+    result = read_query(
+        """
+        SELECT
+            username,
+            password,
+            role,
+            display_name
+        FROM users
+        WHERE username = :username
+        """,
+        {
+            "username": username
+        },
+    )
+
+    if result.empty:
+        return False
+
+    user = result.iloc[0]
+
+    if password != user["password"]:
+        return False
+
+    st.session_state.logged_in = True
+    st.session_state.username = user["username"]
+    st.session_state.role = user["role"]
+    st.session_state.display_name = user["display_name"]
+
+    return True
+
+
+def logout():
+
+    st.session_state.logged_in = False
+    st.session_state.username = None
+    st.session_state.role = None
+    st.session_state.display_name = None
+
+    st.rerun()
+
+
+# ============================================================
+# LOGIN PAGE
+# ============================================================
+
+if not st.session_state.logged_in:
 
     st.title("💰 Loan Manager")
 
-    if database_connected:
-        st.success("Database Connected")
-    else:
-        st.error("Database Disconnected")
-
-    page = st.radio(
-        "Navigation",
-        [
-            "Dashboard",
-            "Loans",
-            "Payments",
-            "Analytics",
-        ],
+    st.caption(
+        "Simple loan and payment tracking"
     )
 
+    st.write("")
 
-# --------------------------------------------------
-# Dashboard
-# --------------------------------------------------
+    with st.form("login_form"):
 
-if page == "Dashboard":
+        username = st.text_input(
+            "Username",
+            placeholder="Enter username",
+        )
 
-    st.title("💰 Loan Management Dashboard")
+        password = st.text_input(
+            "Password",
+            type="password",
+            placeholder="Enter password",
+        )
 
-    st.write(
-        "Manage your loans, payments, EMIs and financial analytics."
-    )
+        login_clicked = st.form_submit_button(
+            "Login",
+            type="primary",
+            width="stretch",
+        )
 
-    loans = read_query(
+        if login_clicked:
+
+            if login_user(username, password):
+
+                st.rerun()
+
+            else:
+
+                st.error(
+                    "Invalid username or password."
+                )
+
+    st.stop()
+
+
+# ============================================================
+# COMMON DATA
+# ============================================================
+
+def get_loans():
+
+    return read_query(
         """
-        SELECT *
+        SELECT
+            id,
+            name,
+            loan_type,
+            original_amount,
+            interest_rate,
+            start_date,
+            notes,
+            is_active
         FROM loans
         ORDER BY created_at DESC
         """
     )
 
-    col1, col2, col3 = st.columns(3)
 
-    with col1:
-        st.metric(
-            "Total Loans",
-            len(loans),
-        )
+def get_payments():
 
-    with col2:
-        total_principal = (
-            loans["principal_amount"].sum()
-            if not loans.empty
-            else 0
-        )
+    return read_query(
+        """
+        SELECT
+            p.id,
+            p.loan_id,
+            l.name AS loan_name,
+            p.amount,
+            p.payment_date,
+            p.paid_by,
+            p.status,
+            p.note,
 
-        st.metric(
-            "Total Principal",
-            f"₹{total_principal:,.2f}",
-        )
+            COALESCE(
+                pa.interest_amount,
+                0
+            ) AS interest_amount,
 
-    with col3:
-        st.metric(
-            "Active Loans",
-            len(loans),
-        )
+            COALESCE(
+                pa.principal_amount,
+                0
+            ) AS principal_amount,
+
+            pa.allocated_by,
+            pa.allocated_at
+
+        FROM payments p
+
+        JOIN loans l
+            ON p.loan_id = l.id
+
+        LEFT JOIN payment_allocations pa
+            ON p.id = pa.payment_id
+
+        ORDER BY p.payment_date DESC, p.id DESC
+        """
+    )
+
+
+# ============================================================
+# CALCULATIONS
+# ============================================================
+
+def get_loan_summary(loan_id):
+
+    result = read_query(
+        """
+        SELECT
+
+            l.original_amount,
+
+            COALESCE(
+                SUM(pa.principal_amount),
+                0
+            ) AS principal_paid,
+
+            COALESCE(
+                SUM(pa.interest_amount),
+                0
+            ) AS interest_paid
+
+        FROM loans l
+
+        LEFT JOIN payments p
+            ON l.id = p.loan_id
+
+        LEFT JOIN payment_allocations pa
+            ON p.id = pa.payment_id
+
+        WHERE l.id = :loan_id
+
+        GROUP BY l.id, l.original_amount
+        """,
+        {
+            "loan_id": loan_id
+        },
+    )
+
+    if result.empty:
+        return {
+            "original": Decimal("0"),
+            "principal": Decimal("0"),
+            "interest": Decimal("0"),
+            "remaining": Decimal("0"),
+        }
+
+    row = result.iloc[0]
+
+    original = Decimal(str(row["original_amount"] or 0))
+    principal = Decimal(str(row["principal_paid"] or 0))
+    interest = Decimal(str(row["interest_paid"] or 0))
+
+    remaining = max(
+        original - principal,
+        Decimal("0"),
+    )
+
+    return {
+        "original": original,
+        "principal": principal,
+        "interest": interest,
+        "remaining": remaining,
+    }
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+with st.sidebar:
+
+    st.title("💰 Loan Manager")
+
+    st.write(
+        f"Welcome, **{st.session_state.display_name}**"
+    )
 
     st.divider()
 
-    if loans.empty:
+    if st.session_state.role == "superuser":
 
-        st.info(
-            "No loans found. Go to the Loans page to add your first loan."
+        page = st.radio(
+            "Menu",
+            [
+                "Dashboard",
+                "My Loans",
+                "Add Payment",
+                "Payment History",
+            ],
         )
 
     else:
 
-        st.subheader("Your Loans")
-
-        st.dataframe(
-            loans,
-            width="stretch",
-            hide_index=True,
+        page = st.radio(
+            "Menu",
+            [
+                "Dashboard",
+                "Pending Payments",
+                "Payment History",
+                "Loans",
+            ],
         )
 
+    st.divider()
 
-# --------------------------------------------------
-# Loans
-# --------------------------------------------------
+    if st.button(
+        "Logout",
+        width="stretch",
+    ):
+        logout()
 
-elif page == "Loans":
 
-    st.title("📋 Loan Management")
+# ============================================================
+# DASHBOARD
+# ============================================================
 
-    tab1, tab2 = st.tabs(
-        [
-            "Add Loan",
-            "View Loans",
-        ]
+if page == "Dashboard":
+
+    st.title("🏠 Dashboard")
+
+    loans = get_loans()
+    payments = get_payments()
+
+    # --------------------------------------------------------
+    # TOTALS
+    # --------------------------------------------------------
+
+    total_original = Decimal("0")
+    total_principal = Decimal("0")
+    total_interest = Decimal("0")
+
+    for loan_id in loans["id"].tolist():
+
+        summary = get_loan_summary(
+            int(loan_id)
+        )
+
+        total_original += summary["original"]
+        total_principal += summary["principal"]
+        total_interest += summary["interest"]
+
+    total_remaining = max(
+        total_original - total_principal,
+        Decimal("0"),
     )
 
-    # ----------------------------------------------
-    # Add loan
-    # ----------------------------------------------
+    col1, col2 = st.columns(2)
 
-    with tab1:
+    with col1:
+
+        st.metric(
+            "Outstanding Principal",
+            f"₹{total_remaining:,.2f}",
+        )
+
+    with col2:
+
+        st.metric(
+            "Total Interest Paid",
+            f"₹{total_interest:,.2f}",
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # QUICK ACTIONS
+    # --------------------------------------------------------
+
+    if st.session_state.role == "superuser":
+
+        st.subheader("Quick Actions")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            if st.button(
+                "💸 Add Payment",
+                width="stretch",
+                type="primary",
+            ):
+                st.session_state.dashboard_action = "payment"
+
+        with col2:
+
+            st.info(
+                "Record the amount you paid."
+            )
+
+    else:
+
+        pending_count = len(
+            payments[
+                payments["status"] == "pending"
+            ]
+        )
+
+        st.subheader("Pending Payments")
+
+        st.metric(
+            "Waiting for Allocation",
+            pending_count,
+        )
+
+    # --------------------------------------------------------
+    # RECENT PAYMENTS
+    # --------------------------------------------------------
+
+    st.subheader("Recent Payments")
+
+    if payments.empty:
+
+        st.info(
+            "No payments recorded yet."
+        )
+
+    else:
+
+        recent = payments.head(5)
+
+        for _, payment in recent.iterrows():
+
+            status = payment["status"]
+
+            if status == "allocated":
+                status_text = "✅ Allocated"
+            else:
+                status_text = "⏳ Pending"
+
+            st.markdown(
+                f"""
+                <div class="loan-card">
+
+                <div class="amount">
+                ₹{float(payment["amount"]):,.2f}
+                </div>
+
+                <b>{payment["loan_name"]}</b>
+
+                <div class="small-text">
+                {payment["payment_date"]} ·
+                {status_text}
+                </div>
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+# ============================================================
+# MY LOANS
+# ============================================================
+
+elif page == "My Loans":
+
+    st.title("💰 My Loans")
+
+    loans = get_loans()
+
+    if loans.empty:
+
+        st.info(
+            "No loans have been added yet."
+        )
+
+    else:
+
+        for _, loan in loans.iterrows():
+
+            summary = get_loan_summary(
+                int(loan["id"])
+            )
+
+            st.markdown(
+                f"""
+                <div class="loan-card">
+
+                <h3>{loan["name"]}</h3>
+
+                <div class="small-text">
+                {loan["loan_type"].title()}
+                </div>
+
+                <br>
+
+                <b>Outstanding</b>
+
+                <div class="amount">
+                ₹{summary["remaining"]:,.2f}
+                </div>
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric(
+                    "Original",
+                    f"₹{summary['original']:,.0f}",
+                )
+
+            with col2:
+                st.metric(
+                    "Principal Paid",
+                    f"₹{summary['principal']:,.0f}",
+                )
+
+            with col3:
+                st.metric(
+                    "Interest Paid",
+                    f"₹{summary['interest']:,.0f}",
+                )
+
+            if loan["notes"]:
+                st.caption(
+                    f"📝 {loan['notes']}"
+                )
+
+            st.divider()
+
+        # ----------------------------------------------------
+        # ADD LOAN
+        # ----------------------------------------------------
+
+        st.subheader("➕ Add Loan")
 
         with st.form("add_loan_form"):
 
-            loan_name = st.text_input(
+            name = st.text_input(
                 "Loan Name",
-                placeholder="e.g. Home Loan",
+                placeholder="e.g. Home Goal Loan",
             )
 
-            lender = st.text_input(
-                "Lender",
-                placeholder="e.g. HDFC Bank",
+            loan_type = st.selectbox(
+                "Loan Type",
+                [
+                    "goal",
+                    "fixed",
+                ],
             )
 
-            principal = st.number_input(
-                "Principal Amount",
+            original_amount = st.number_input(
+                "Original Principal Amount",
                 min_value=0.0,
                 step=1000.0,
             )
 
             interest_rate = st.number_input(
-                "Annual Interest Rate (%)",
+                "Interest Rate (%)",
                 min_value=0.0,
-                max_value=100.0,
                 step=0.1,
             )
 
-            tenure = st.number_input(
-                "Tenure (months)",
-                min_value=1,
-                step=1,
+            start_date = st.date_input(
+                "Start Date",
+                value=date.today(),
             )
 
-            start_date = st.date_input(
-                "Loan Start Date",
+            notes = st.text_area(
+                "Notes",
+                placeholder="Optional notes",
             )
 
             submitted = st.form_submit_button(
-                "Add Loan",
+                "Create Loan",
                 type="primary",
+                width="stretch",
             )
 
             if submitted:
 
-                if not loan_name:
-                    st.warning("Please enter a loan name.")
+                if not name.strip():
 
-                elif principal <= 0:
-                    st.warning("Principal must be greater than zero.")
+                    st.error(
+                        "Loan name is required."
+                    )
+
+                elif original_amount <= 0:
+
+                    st.error(
+                        "Original amount must be greater than zero."
+                    )
 
                 else:
 
                     execute_query(
                         """
                         INSERT INTO loans (
-                            loan_name,
-                            lender,
-                            principal_amount,
+                            name,
+                            loan_type,
+                            original_amount,
                             interest_rate,
-                            tenure_months,
-                            start_date
+                            start_date,
+                            notes
                         )
                         VALUES (
-                            :loan_name,
-                            :lender,
-                            :principal,
+                            :name,
+                            :loan_type,
+                            :original_amount,
                             :interest_rate,
-                            :tenure,
-                            :start_date
+                            :start_date,
+                            :notes
                         )
                         """,
                         {
-                            "loan_name": loan_name,
-                            "lender": lender,
-                            "principal": principal,
+                            "name": name.strip(),
+                            "loan_type": loan_type,
+                            "original_amount": original_amount,
                             "interest_rate": interest_rate,
-                            "tenure": tenure,
                             "start_date": start_date,
+                            "notes": notes,
                         },
                     )
 
                     st.success(
-                        f"{loan_name} added successfully!"
+                        "Loan created successfully."
                     )
 
                     st.rerun()
 
-    # ----------------------------------------------
-    # View loans
-    # ----------------------------------------------
 
-    with tab2:
+# ============================================================
+# ADD PAYMENT
+# ============================================================
 
-        loans = read_query(
-            """
-            SELECT
-                id,
-                loan_name,
-                lender,
-                principal_amount,
-                interest_rate,
-                tenure_months,
-                start_date
-            FROM loans
-            ORDER BY created_at DESC
-            """
+elif page == "Add Payment":
+
+    st.title("💸 Add Payment")
+
+    st.caption(
+        "Record money you paid to your father."
+    )
+
+    loans = get_loans()
+
+    if loans.empty:
+
+        st.warning(
+            "Create a loan first."
         )
 
-        if loans.empty:
+    else:
 
-            st.info("No loans available.")
+        with st.form("payment_form"):
 
-        else:
+            loan_options = {
+                f"{row['name']} — ₹{float(row['original_amount']):,.0f}":
+                int(row["id"])
+                for _, row in loans.iterrows()
+                if row["is_active"]
+            }
 
-            st.dataframe(
-                loans,
-                width="stretch",
-                hide_index=True,
+            selected_loan = st.selectbox(
+                "Loan",
+                list(loan_options.keys()),
             )
 
+            amount = st.number_input(
+                "Amount Paid",
+                min_value=0.0,
+                step=500.0,
+            )
 
-# --------------------------------------------------
-# Payments
-# --------------------------------------------------
+            payment_date = st.date_input(
+                "Payment Date",
+                value=date.today(),
+            )
 
-elif page == "Payments":
+            note = st.text_area(
+                "Note",
+                placeholder="Optional note",
+            )
 
-    st.title("💳 Payments")
+            submitted = st.form_submit_button(
+                "Record Payment",
+                type="primary",
+                width="stretch",
+            )
 
-    st.info(
-        "Payment tracking will be added next."
+            if submitted:
+
+                if amount <= 0:
+
+                    st.error(
+                        "Payment amount must be greater than zero."
+                    )
+
+                else:
+
+                    loan_id = loan_options[
+                        selected_loan
+                    ]
+
+                    execute_query(
+                        """
+                        INSERT INTO payments (
+                            loan_id,
+                            amount,
+                            payment_date,
+                            paid_by,
+                            status,
+                            note
+                        )
+                        VALUES (
+                            :loan_id,
+                            :amount,
+                            :payment_date,
+                            :paid_by,
+                            'pending',
+                            :note
+                        )
+                        """,
+                        {
+                            "loan_id": loan_id,
+                            "amount": amount,
+                            "payment_date": payment_date,
+                            "paid_by": st.session_state.username,
+                            "note": note,
+                        },
+                    )
+
+                    st.success(
+                        f"₹{amount:,.2f} payment recorded."
+                    )
+
+                    st.info(
+                        "Your father can now allocate this payment between interest and principal."
+                    )
+
+                    st.rerun()
+
+
+# ============================================================
+# PENDING PAYMENTS - FATHER
+# ============================================================
+
+elif page == "Pending Payments":
+
+    st.title("⏳ Pending Payments")
+
+    st.caption(
+        "Allocate each received payment between interest and principal."
     )
 
+    payments = get_payments()
 
-# --------------------------------------------------
-# Analytics
-# --------------------------------------------------
+    pending = payments[
+        payments["status"] == "pending"
+    ]
 
-elif page == "Analytics":
+    if pending.empty:
 
-    st.title("📊 Analytics")
+        st.success(
+            "No payments are waiting for allocation."
+        )
 
-    st.info(
-        "Loan analytics and visualizations will be added next."
-    )
+    else:
+
+        for _, payment in pending.iterrows():
+
+            st.markdown(
+                f"""
+                <div class="loan-card">
+
+                <h3>₹{float(payment["amount"]):,.2f}</h3>
+
+                <b>{payment["loan_name"]}</b>
+
+                <div class="small-text">
+                Paid on {payment["payment_date"]}
+                </div>
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            payment_amount = float(
+                payment["amount"]
+            )
+
+            with st.form(
+                f"allocation_{payment['id']}"
+            ):
+
+                interest = st.number_input(
+                    "Interest",
+                    min_value=0.0,
+                    max_value=payment_amount,
+                    value=0.0,
+                    step=100.0,
+                    key=f"interest_{payment['id']}",
+                )
+
+                principal = st.number_input(
+                    "Principal",
+                    min_value=0.0,
+                    max_value=payment_amount,
+                    value=0.0,
+                    step=100.0,
+                    key=f"principal_{payment['id']}",
+                )
+
+                total = interest + principal
+
+                st.write(
+                    f"Allocated: ₹{total:,.2f} / ₹{payment_amount:,.2f}"
+                )
+
+                submitted = st.form_submit_button(
+                    "Confirm Allocation",
+                    type="primary",
+                    width="stretch",
+                )
+
+                if submitted:
+
+                    if abs(
+                        total - payment_amount
+                    ) > 0.01:
+
+                        st.error(
+                            f"Interest + Principal must equal ₹{payment_amount:,.2f}"
+                        )
+
+                    else:
+
+                        execute_query(
+                            """
+                            INSERT INTO payment_allocations (
+                                payment_id,
+                                interest_amount,
+                                principal_amount,
+                                allocated_by
+                            )
+                            VALUES (
+                                :payment_id,
+                                :interest,
+                                :principal,
+                                :allocated_by
+                            )
+                            """,
+                            {
+                                "payment_id": int(payment["id"]),
+                                "interest": interest,
+                                "principal": principal,
+                                "allocated_by":
+                                    st.session_state.username,
+                            },
+                        )
+
+                        execute_query(
+                            """
+                            UPDATE payments
+                            SET status = 'allocated'
+                            WHERE id = :payment_id
+                            """,
+                            {
+                                "payment_id":
+                                    int(payment["id"])
+                            },
+                        )
+
+                        st.success(
+                            "Payment allocation saved."
+                        )
+
+                        st.rerun()
+
+            st.divider()
+
+
+# ============================================================
+# PAYMENT HISTORY
+# ============================================================
+
+elif page == "Payment History":
+
+    st.title("📜 Payment History")
+
+    payments = get_payments()
+
+    if payments.empty:
+
+        st.info(
+            "No payments recorded yet."
+        )
+
+    else:
+
+        for _, payment in payments.iterrows():
+
+            if payment["status"] == "allocated":
+
+                status = "✅ Allocated"
+
+            else:
+
+                status = "⏳ Pending"
+
+            st.markdown(
+                f"""
+                <div class="loan-card">
+
+                <div class="amount">
+                ₹{float(payment["amount"]):,.2f}
+                </div>
+
+                <b>{payment["loan_name"]}</b>
+
+                <div class="small-text">
+                {payment["payment_date"]} · {status}
+                </div>
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if payment["status"] == "allocated":
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+
+                    st.metric(
+                        "Interest",
+                        f"₹{float(payment['interest_amount']):,.2f}",
+                    )
+
+                with col2:
+
+                    st.metric(
+                        "Principal",
+                        f"₹{float(payment['principal_amount']):,.2f}",
+                    )
+
+                if payment["allocated_by"]:
+
+                    st.caption(
+                        f"Allocated by: {payment['allocated_by']}"
+                    )
+
+            if payment["note"]:
+
+                st.caption(
+                    f"📝 {payment['note']}"
+                )
+
+            st.divider()
+
+
+# ============================================================
+# LOANS - FATHER
+# ============================================================
+
+elif page == "Loans":
+
+    st.title("💰 Loans")
+
+    loans = get_loans()
+
+    if loans.empty:
+
+        st.info(
+            "No loans available."
+        )
+
+    else:
+
+        for _, loan in loans.iterrows():
+
+            summary = get_loan_summary(
+                int(loan["id"])
+            )
+
+            st.markdown(
+                f"""
+                <div class="loan-card">
+
+                <h3>{loan["name"]}</h3>
+
+                <div class="small-text">
+                {loan["loan_type"].title()} Loan
+                </div>
+
+                <br>
+
+                <b>Remaining Principal</b>
+
+                <div class="amount">
+                ₹{summary["remaining"]:,.2f}
+                </div>
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                st.metric(
+                    "Principal Paid",
+                    f"₹{summary['principal']:,.2f}",
+                )
+
+            with col2:
+
+                st.metric(
+                    "Interest Paid",
+                    f"₹{summary['interest']:,.2f}",
+                )
+
+            st.divider()
