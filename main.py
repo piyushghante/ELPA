@@ -1,15 +1,14 @@
 import streamlit as st
 import pandas as pd
 
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -21,46 +20,56 @@ st.set_page_config(
 
 
 # ============================================================
-# CUSTOM CSS - MOBILE FRIENDLY
+# MOBILE-FRIENDLY CSS
 # ============================================================
 
 st.markdown(
     """
     <style>
-        .block-container {
-            padding-top: 1rem;
-            padding-left: 1rem;
-            padding-right: 1rem;
-            max-width: 1200px;
-        }
 
-        .loan-card {
-            padding: 1rem;
-            border-radius: 12px;
-            border: 1px solid rgba(128,128,128,0.25);
-            margin-bottom: 1rem;
+    .block-container {
+        padding-top: 1rem;
+        padding-left: 1rem;
+        padding-right: 1rem;
+        max-width: 1200px;
+    }
+
+    .loan-card {
+        padding: 1rem;
+        border-radius: 14px;
+        border: 1px solid rgba(128,128,128,0.25);
+        margin-bottom: 1rem;
+    }
+
+    .amount {
+        font-size: 1.7rem;
+        font-weight: 700;
+    }
+
+    .small-text {
+        font-size: 0.85rem;
+        opacity: 0.7;
+    }
+
+    .success-box {
+        padding: 1rem;
+        border-radius: 12px;
+        border: 1px solid rgba(0,150,0,0.25);
+    }
+
+    @media (max-width: 768px) {
+
+        .block-container {
+            padding-left: 0.7rem;
+            padding-right: 0.7rem;
         }
 
         .amount {
-            font-size: 1.7rem;
-            font-weight: 700;
+            font-size: 1.4rem;
         }
 
-        .small-text {
-            font-size: 0.85rem;
-            opacity: 0.7;
-        }
+    }
 
-        div[data-testid="stMetric"] {
-            padding: 0.5rem;
-        }
-
-        @media (max-width: 768px) {
-            .block-container {
-                padding-left: 0.7rem;
-                padding-right: 0.7rem;
-            }
-        }
     </style>
     """,
     unsafe_allow_html=True,
@@ -68,11 +77,12 @@ st.markdown(
 
 
 # ============================================================
-# DATABASE
+# DATABASE CONNECTION
 # ============================================================
 
 @st.cache_resource
 def get_database_engine():
+
     database_url = st.secrets["DATABASE_URL"]
 
     return create_engine(
@@ -83,12 +93,16 @@ def get_database_engine():
 
 
 try:
+
     engine = get_database_engine()
-    database_available = True
+
 except Exception as error:
-    database_available = False
-    st.error("Unable to initialize database connection.")
+
+    st.error("Unable to connect to PostgreSQL.")
+
     st.exception(error)
+
+    st.stop()
 
 
 # ============================================================
@@ -96,7 +110,9 @@ except Exception as error:
 # ============================================================
 
 def execute_query(query, params=None):
+
     with engine.begin() as connection:
+
         return connection.execute(
             text(query),
             params or {},
@@ -104,7 +120,9 @@ def execute_query(query, params=None):
 
 
 def read_query(query, params=None):
+
     with engine.connect() as connection:
+
         return pd.read_sql(
             text(query),
             connection,
@@ -119,7 +137,7 @@ def read_query(query, params=None):
 def initialize_database():
 
     # --------------------------------------------------------
-    # USERS
+    # USERS TABLE
     # --------------------------------------------------------
 
     execute_query(
@@ -127,7 +145,7 @@ def initialize_database():
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             username VARCHAR(100) UNIQUE NOT NULL,
-            password VARCHAR(255) NOT NULL,
+            password_hash TEXT,
             role VARCHAR(30) NOT NULL,
             display_name VARCHAR(100) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -136,7 +154,7 @@ def initialize_database():
     )
 
     # --------------------------------------------------------
-    # LOANS
+    # LOANS TABLE
     # --------------------------------------------------------
 
     execute_query(
@@ -164,7 +182,7 @@ def initialize_database():
     )
 
     # --------------------------------------------------------
-    # PAYMENTS
+    # PAYMENTS TABLE
     # --------------------------------------------------------
 
     execute_query(
@@ -191,7 +209,7 @@ def initialize_database():
     )
 
     # --------------------------------------------------------
-    # PAYMENT ALLOCATIONS
+    # PAYMENT ALLOCATION TABLE
     # --------------------------------------------------------
 
     execute_query(
@@ -202,87 +220,50 @@ def initialize_database():
             payment_id INTEGER UNIQUE NOT NULL
                 REFERENCES payments(id),
 
-            interest_amount NUMERIC(15,2) NOT NULL DEFAULT 0,
+            interest_amount NUMERIC(15,2)
+                NOT NULL DEFAULT 0,
 
-            principal_amount NUMERIC(15,2) NOT NULL DEFAULT 0,
+            principal_amount NUMERIC(15,2)
+                NOT NULL DEFAULT 0,
 
             allocated_by VARCHAR(100) NOT NULL,
 
-            allocated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            allocated_at TIMESTAMP
+                DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
 
+    # --------------------------------------------------------
+    # MIGRATE OLD USERS TABLE
+    # --------------------------------------------------------
 
-# ============================================================
-# DEFAULT USERS
-# ============================================================
+    # If the previous version created a "password" column,
+    # remove it because passwords should now be stored as hashes.
 
-def create_default_users():
-
-    users = [
-        {
-            "username": "superuser",
-            "password": "CHANGE_THIS_PASSWORD",
-            "role": "superuser",
-            "display_name": "Me",
-        },
-        {
-            "username": "home",
-            "password": "CHANGE_THIS_PASSWORD",
-            "role": "home",
-            "display_name": "Father",
-        },
-    ]
-
-    for user in users:
-
-        existing = read_query(
-            """
-            SELECT id
-            FROM users
-            WHERE username = :username
-            """,
-            {
-                "username": user["username"]
-            },
-        )
-
-        if existing.empty:
-
-            execute_query(
-                """
-                INSERT INTO users (
-                    username,
-                    password,
-                    role,
-                    display_name
-                )
-                VALUES (
-                    :username,
-                    :password,
-                    :role,
-                    :display_name
-                )
-                """,
-                user,
-            )
+    execute_query(
+        """
+        ALTER TABLE users
+        ADD COLUMN IF NOT EXISTS password_hash TEXT
+        """
+    )
 
 
 # ============================================================
 # INITIALIZE DATABASE
 # ============================================================
 
-if database_available:
+try:
 
-    try:
-        initialize_database()
-        create_default_users()
+    initialize_database()
 
-    except Exception as error:
-        st.error("Database initialization failed.")
-        st.exception(error)
-        st.stop()
+except Exception as error:
+
+    st.error("Database initialization failed.")
+
+    st.exception(error)
+
+    st.stop()
 
 
 # ============================================================
@@ -312,45 +293,60 @@ def login_user(username, password):
         """
         SELECT
             username,
-            password,
             role,
             display_name
         FROM users
         WHERE username = :username
+
+        AND password_hash = crypt(
+            :password,
+            password_hash
+        )
         """,
         {
-            "username": username
+            "username": username.strip(),
+            "password": password,
         },
     )
 
     if result.empty:
+
         return False
 
     user = result.iloc[0]
 
-    if password != user["password"]:
-        return False
-
     st.session_state.logged_in = True
+
     st.session_state.username = user["username"]
+
     st.session_state.role = user["role"]
-    st.session_state.display_name = user["display_name"]
+
+    st.session_state.display_name = user[
+        "display_name"
+    ]
 
     return True
 
 
+# ============================================================
+# LOGOUT
+# ============================================================
+
 def logout():
 
     st.session_state.logged_in = False
+
     st.session_state.username = None
+
     st.session_state.role = None
+
     st.session_state.display_name = None
 
     st.rerun()
 
 
 # ============================================================
-# LOGIN PAGE
+# LOGIN SCREEN
 # ============================================================
 
 if not st.session_state.logged_in:
@@ -358,7 +354,7 @@ if not st.session_state.logged_in:
     st.title("💰 Loan Manager")
 
     st.caption(
-        "Simple loan and payment tracking"
+        "Simple loan and payment management"
     )
 
     st.write("")
@@ -384,7 +380,16 @@ if not st.session_state.logged_in:
 
         if login_clicked:
 
-            if login_user(username, password):
+            if not username or not password:
+
+                st.warning(
+                    "Please enter username and password."
+                )
+
+            elif login_user(
+                username,
+                password,
+            ):
 
                 st.rerun()
 
@@ -398,7 +403,7 @@ if not st.session_state.logged_in:
 
 
 # ============================================================
-# COMMON DATA
+# LOAN DATA
 # ============================================================
 
 def get_loans():
@@ -420,18 +425,30 @@ def get_loans():
     )
 
 
+# ============================================================
+# PAYMENT DATA
+# ============================================================
+
 def get_payments():
 
     return read_query(
         """
         SELECT
+
             p.id,
+
             p.loan_id,
+
             l.name AS loan_name,
+
             p.amount,
+
             p.payment_date,
+
             p.paid_by,
+
             p.status,
+
             p.note,
 
             COALESCE(
@@ -445,6 +462,7 @@ def get_payments():
             ) AS principal_amount,
 
             pa.allocated_by,
+
             pa.allocated_at
 
         FROM payments p
@@ -455,13 +473,15 @@ def get_payments():
         LEFT JOIN payment_allocations pa
             ON p.id = pa.payment_id
 
-        ORDER BY p.payment_date DESC, p.id DESC
+        ORDER BY
+            p.payment_date DESC,
+            p.id DESC
         """
     )
 
 
 # ============================================================
-# CALCULATIONS
+# LOAN SUMMARY
 # ============================================================
 
 def get_loan_summary(loan_id):
@@ -492,7 +512,9 @@ def get_loan_summary(loan_id):
 
         WHERE l.id = :loan_id
 
-        GROUP BY l.id, l.original_amount
+        GROUP BY
+            l.id,
+            l.original_amount
         """,
         {
             "loan_id": loan_id
@@ -500,6 +522,7 @@ def get_loan_summary(loan_id):
     )
 
     if result.empty:
+
         return {
             "original": Decimal("0"),
             "principal": Decimal("0"),
@@ -509,9 +532,17 @@ def get_loan_summary(loan_id):
 
     row = result.iloc[0]
 
-    original = Decimal(str(row["original_amount"] or 0))
-    principal = Decimal(str(row["principal_paid"] or 0))
-    interest = Decimal(str(row["interest_paid"] or 0))
+    original = Decimal(
+        str(row["original_amount"] or 0)
+    )
+
+    principal = Decimal(
+        str(row["principal_paid"] or 0)
+    )
+
+    interest = Decimal(
+        str(row["interest_paid"] or 0)
+    )
 
     remaining = max(
         original - principal,
@@ -534,8 +565,8 @@ with st.sidebar:
 
     st.title("💰 Loan Manager")
 
-    st.write(
-        f"Welcome, **{st.session_state.display_name}**"
+    st.caption(
+        f"Logged in as {st.session_state.display_name}"
     )
 
     st.divider()
@@ -570,6 +601,7 @@ with st.sidebar:
         "Logout",
         width="stretch",
     ):
+
         logout()
 
 
@@ -582,14 +614,17 @@ if page == "Dashboard":
     st.title("🏠 Dashboard")
 
     loans = get_loans()
+
     payments = get_payments()
 
     # --------------------------------------------------------
-    # TOTALS
+    # CALCULATE TOTALS
     # --------------------------------------------------------
 
     total_original = Decimal("0")
+
     total_principal = Decimal("0")
+
     total_interest = Decimal("0")
 
     for loan_id in loans["id"].tolist():
@@ -599,13 +634,19 @@ if page == "Dashboard":
         )
 
         total_original += summary["original"]
+
         total_principal += summary["principal"]
+
         total_interest += summary["interest"]
 
     total_remaining = max(
         total_original - total_principal,
         Decimal("0"),
     )
+
+    # --------------------------------------------------------
+    # TOP METRICS
+    # --------------------------------------------------------
 
     col1, col2 = st.columns(2)
 
@@ -619,14 +660,14 @@ if page == "Dashboard":
     with col2:
 
         st.metric(
-            "Total Interest Paid",
+            "Interest Paid",
             f"₹{total_interest:,.2f}",
         )
 
     st.divider()
 
     # --------------------------------------------------------
-    # QUICK ACTIONS
+    # SUPERUSER DASHBOARD
     # --------------------------------------------------------
 
     if st.session_state.role == "superuser":
@@ -637,32 +678,40 @@ if page == "Dashboard":
 
         with col1:
 
-            if st.button(
-                "💸 Add Payment",
-                width="stretch",
-                type="primary",
-            ):
-                st.session_state.dashboard_action = "payment"
+            st.info(
+                "💸 Add the amount you paid."
+            )
 
         with col2:
 
-            st.info(
-                "Record the amount you paid."
+            pending = len(
+                payments[
+                    payments["status"] == "pending"
+                ]
             )
+
+            st.metric(
+                "Pending Allocations",
+                pending,
+            )
+
+    # --------------------------------------------------------
+    # FATHER DASHBOARD
+    # --------------------------------------------------------
 
     else:
 
-        pending_count = len(
-            payments[
-                payments["status"] == "pending"
-            ]
+        pending = payments[
+            payments["status"] == "pending"
+        ]
+
+        st.subheader(
+            "Payments Waiting for Allocation"
         )
 
-        st.subheader("Pending Payments")
-
         st.metric(
-            "Waiting for Allocation",
-            pending_count,
+            "Pending",
+            len(pending),
         )
 
     # --------------------------------------------------------
@@ -679,31 +728,35 @@ if page == "Dashboard":
 
     else:
 
-        recent = payments.head(5)
+        for _, payment in payments.head(
+            5
+        ).iterrows():
 
-        for _, payment in recent.iterrows():
+            if payment["status"] == "allocated":
 
-            status = payment["status"]
-
-            if status == "allocated":
                 status_text = "✅ Allocated"
+
             else:
+
                 status_text = "⏳ Pending"
 
             st.markdown(
                 f"""
                 <div class="loan-card">
 
-                <div class="amount">
-                ₹{float(payment["amount"]):,.2f}
-                </div>
+                    <div class="amount">
+                        ₹{float(payment["amount"]):,.2f}
+                    </div>
 
-                <b>{payment["loan_name"]}</b>
+                    <b>
+                        {payment["loan_name"]}
+                    </b>
 
-                <div class="small-text">
-                {payment["payment_date"]} ·
-                {status_text}
-                </div>
+                    <div class="small-text">
+                        {payment["payment_date"]}
+                        ·
+                        {status_text}
+                    </div>
 
                 </div>
                 """,
@@ -724,7 +777,7 @@ elif page == "My Loans":
     if loans.empty:
 
         st.info(
-            "No loans have been added yet."
+            "No loans have been created yet."
         )
 
     else:
@@ -739,151 +792,162 @@ elif page == "My Loans":
                 f"""
                 <div class="loan-card">
 
-                <h3>{loan["name"]}</h3>
+                    <h3>
+                        {loan["name"]}
+                    </h3>
 
-                <div class="small-text">
-                {loan["loan_type"].title()}
-                </div>
+                    <div class="small-text">
+                        {loan["loan_type"].title()} Loan
+                    </div>
 
-                <br>
+                    <br>
 
-                <b>Outstanding</b>
+                    <div class="small-text">
+                        Outstanding Principal
+                    </div>
 
-                <div class="amount">
-                ₹{summary["remaining"]:,.2f}
-                </div>
+                    <div class="amount">
+                        ₹{summary["remaining"]:,.2f}
+                    </div>
 
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
 
             with col1:
+
                 st.metric(
-                    "Original",
-                    f"₹{summary['original']:,.0f}",
+                    "Principal Paid",
+                    f"₹{summary['principal']:,.2f}",
                 )
 
             with col2:
-                st.metric(
-                    "Principal Paid",
-                    f"₹{summary['principal']:,.0f}",
-                )
 
-            with col3:
                 st.metric(
                     "Interest Paid",
-                    f"₹{summary['interest']:,.0f}",
+                    f"₹{summary['interest']:,.2f}",
+                )
+
+            if loan["interest_rate"]:
+
+                st.caption(
+                    f"Interest Rate: "
+                    f"{float(loan['interest_rate']):.2f}%"
                 )
 
             if loan["notes"]:
+
                 st.caption(
                     f"📝 {loan['notes']}"
                 )
 
             st.divider()
 
-        # ----------------------------------------------------
-        # ADD LOAN
-        # ----------------------------------------------------
+    # --------------------------------------------------------
+    # CREATE LOAN
+    # --------------------------------------------------------
 
-        st.subheader("➕ Add Loan")
+    st.subheader("➕ Create Loan")
 
-        with st.form("add_loan_form"):
+    with st.form("create_loan_form"):
 
-            name = st.text_input(
-                "Loan Name",
-                placeholder="e.g. Home Goal Loan",
-            )
+        name = st.text_input(
+            "Loan Name",
+            placeholder="Example: Home Loan",
+        )
 
-            loan_type = st.selectbox(
-                "Loan Type",
-                [
-                    "goal",
-                    "fixed",
-                ],
-            )
+        loan_type = st.selectbox(
+            "Loan Type",
+            [
+                "goal",
+                "fixed",
+            ],
+        )
 
-            original_amount = st.number_input(
-                "Original Principal Amount",
-                min_value=0.0,
-                step=1000.0,
-            )
+        original_amount = st.number_input(
+            "Original Principal Amount",
+            min_value=0.0,
+            step=1000.0,
+        )
 
-            interest_rate = st.number_input(
-                "Interest Rate (%)",
-                min_value=0.0,
-                step=0.1,
-            )
+        interest_rate = st.number_input(
+            "Interest Rate (%)",
+            min_value=0.0,
+            step=0.1,
+        )
 
-            start_date = st.date_input(
-                "Start Date",
-                value=date.today(),
-            )
+        start_date = st.date_input(
+            "Start Date",
+            value=date.today(),
+        )
 
-            notes = st.text_area(
-                "Notes",
-                placeholder="Optional notes",
-            )
+        notes = st.text_area(
+            "Notes",
+            placeholder="Optional",
+        )
 
-            submitted = st.form_submit_button(
-                "Create Loan",
-                type="primary",
-                width="stretch",
-            )
+        submitted = st.form_submit_button(
+            "Create Loan",
+            type="primary",
+            width="stretch",
+        )
 
-            if submitted:
+        if submitted:
 
-                if not name.strip():
+            if not name.strip():
 
-                    st.error(
-                        "Loan name is required."
+                st.error(
+                    "Loan name is required."
+                )
+
+            elif original_amount <= 0:
+
+                st.error(
+                    "Original amount must be greater than zero."
+                )
+
+            else:
+
+                execute_query(
+                    """
+                    INSERT INTO loans (
+                        name,
+                        loan_type,
+                        original_amount,
+                        interest_rate,
+                        start_date,
+                        notes
                     )
-
-                elif original_amount <= 0:
-
-                    st.error(
-                        "Original amount must be greater than zero."
+                    VALUES (
+                        :name,
+                        :loan_type,
+                        :original_amount,
+                        :interest_rate,
+                        :start_date,
+                        :notes
                     )
-
-                else:
-
-                    execute_query(
-                        """
-                        INSERT INTO loans (
-                            name,
-                            loan_type,
+                    """,
+                    {
+                        "name": name.strip(),
+                        "loan_type": loan_type,
+                        "original_amount":
                             original_amount,
+                        "interest_rate":
                             interest_rate,
+                        "start_date":
                             start_date,
-                            notes
-                        )
-                        VALUES (
-                            :name,
-                            :loan_type,
-                            :original_amount,
-                            :interest_rate,
-                            :start_date,
-                            :notes
-                        )
-                        """,
-                        {
-                            "name": name.strip(),
-                            "loan_type": loan_type,
-                            "original_amount": original_amount,
-                            "interest_rate": interest_rate,
-                            "start_date": start_date,
-                            "notes": notes,
-                        },
-                    )
+                        "notes": notes,
+                    },
+                )
 
-                    st.success(
-                        "Loan created successfully."
-                    )
+                st.success(
+                    "Loan created successfully."
+                )
 
-                    st.rerun()
+                st.rerun()
 
 
 # ============================================================
@@ -900,10 +964,14 @@ elif page == "Add Payment":
 
     loans = get_loans()
 
-    if loans.empty:
+    active_loans = loans[
+        loans["is_active"] == True
+    ]
+
+    if active_loans.empty:
 
         st.warning(
-            "Create a loan first."
+            "There are no active loans."
         )
 
     else:
@@ -911,15 +979,17 @@ elif page == "Add Payment":
         with st.form("payment_form"):
 
             loan_options = {
-                f"{row['name']} — ₹{float(row['original_amount']):,.0f}":
+                row["name"]:
                 int(row["id"])
-                for _, row in loans.iterrows()
-                if row["is_active"]
+                for _, row
+                in active_loans.iterrows()
             }
 
             selected_loan = st.selectbox(
                 "Loan",
-                list(loan_options.keys()),
+                list(
+                    loan_options.keys()
+                ),
             )
 
             amount = st.number_input(
@@ -980,8 +1050,10 @@ elif page == "Add Payment":
                         {
                             "loan_id": loan_id,
                             "amount": amount,
-                            "payment_date": payment_date,
-                            "paid_by": st.session_state.username,
+                            "payment_date":
+                                payment_date,
+                            "paid_by":
+                                st.session_state.username,
                             "note": note,
                         },
                     )
@@ -991,14 +1063,14 @@ elif page == "Add Payment":
                     )
 
                     st.info(
-                        "Your father can now allocate this payment between interest and principal."
+                        "Your father can now allocate this payment."
                     )
 
                     st.rerun()
 
 
 # ============================================================
-# PENDING PAYMENTS - FATHER
+# PENDING PAYMENTS
 # ============================================================
 
 elif page == "Pending Payments":
@@ -1006,7 +1078,8 @@ elif page == "Pending Payments":
     st.title("⏳ Pending Payments")
 
     st.caption(
-        "Allocate each received payment between interest and principal."
+        "Allocate received payments between "
+        "interest and principal."
     )
 
     payments = get_payments()
@@ -1018,32 +1091,37 @@ elif page == "Pending Payments":
     if pending.empty:
 
         st.success(
-            "No payments are waiting for allocation."
+            "No pending payments."
         )
 
     else:
 
         for _, payment in pending.iterrows():
 
+            payment_amount = float(
+                payment["amount"]
+            )
+
             st.markdown(
                 f"""
                 <div class="loan-card">
 
-                <h3>₹{float(payment["amount"]):,.2f}</h3>
+                    <div class="amount">
+                        ₹{payment_amount:,.2f}
+                    </div>
 
-                <b>{payment["loan_name"]}</b>
+                    <b>
+                        {payment["loan_name"]}
+                    </b>
 
-                <div class="small-text">
-                Paid on {payment["payment_date"]}
-                </div>
+                    <div class="small-text">
+                        Paid on
+                        {payment["payment_date"]}
+                    </div>
 
                 </div>
                 """,
                 unsafe_allow_html=True,
-            )
-
-            payment_amount = float(
-                payment["amount"]
             )
 
             with st.form(
@@ -1056,7 +1134,6 @@ elif page == "Pending Payments":
                     max_value=payment_amount,
                     value=0.0,
                     step=100.0,
-                    key=f"interest_{payment['id']}",
                 )
 
                 principal = st.number_input(
@@ -1065,14 +1142,36 @@ elif page == "Pending Payments":
                     max_value=payment_amount,
                     value=0.0,
                     step=100.0,
-                    key=f"principal_{payment['id']}",
                 )
 
-                total = interest + principal
-
-                st.write(
-                    f"Allocated: ₹{total:,.2f} / ₹{payment_amount:,.2f}"
+                total = (
+                    interest +
+                    principal
                 )
+
+                remaining = (
+                    payment_amount -
+                    total
+                )
+
+                if remaining > 0:
+
+                    st.caption(
+                        f"Remaining to allocate: "
+                        f"₹{remaining:,.2f}"
+                    )
+
+                elif remaining < 0:
+
+                    st.error(
+                        "Allocation exceeds payment."
+                    )
+
+                else:
+
+                    st.success(
+                        "Fully allocated."
+                    )
 
                 submitted = st.form_submit_button(
                     "Confirm Allocation",
@@ -1083,18 +1182,21 @@ elif page == "Pending Payments":
                 if submitted:
 
                     if abs(
-                        total - payment_amount
+                        total -
+                        payment_amount
                     ) > 0.01:
 
                         st.error(
-                            f"Interest + Principal must equal ₹{payment_amount:,.2f}"
+                            "Interest + Principal "
+                            "must equal the payment amount."
                         )
 
                     else:
 
                         execute_query(
                             """
-                            INSERT INTO payment_allocations (
+                            INSERT INTO
+                            payment_allocations (
                                 payment_id,
                                 interest_amount,
                                 principal_amount,
@@ -1108,9 +1210,14 @@ elif page == "Pending Payments":
                             )
                             """,
                             {
-                                "payment_id": int(payment["id"]),
-                                "interest": interest,
-                                "principal": principal,
+                                "payment_id":
+                                    int(
+                                        payment["id"]
+                                    ),
+                                "interest":
+                                    interest,
+                                "principal":
+                                    principal,
                                 "allocated_by":
                                     st.session_state.username,
                             },
@@ -1124,7 +1231,9 @@ elif page == "Pending Payments":
                             """,
                             {
                                 "payment_id":
-                                    int(payment["id"])
+                                    int(
+                                        payment["id"]
+                                    )
                             },
                         )
 
@@ -1169,15 +1278,19 @@ elif page == "Payment History":
                 f"""
                 <div class="loan-card">
 
-                <div class="amount">
-                ₹{float(payment["amount"]):,.2f}
-                </div>
+                    <div class="amount">
+                        ₹{float(payment["amount"]):,.2f}
+                    </div>
 
-                <b>{payment["loan_name"]}</b>
+                    <b>
+                        {payment["loan_name"]}
+                    </b>
 
-                <div class="small-text">
-                {payment["payment_date"]} · {status}
-                </div>
+                    <div class="small-text">
+                        {payment["payment_date"]}
+                        ·
+                        {status}
+                    </div>
 
                 </div>
                 """,
@@ -1205,7 +1318,8 @@ elif page == "Payment History":
                 if payment["allocated_by"]:
 
                     st.caption(
-                        f"Allocated by: {payment['allocated_by']}"
+                        f"Allocated by: "
+                        f"{payment['allocated_by']}"
                     )
 
             if payment["note"]:
@@ -1218,7 +1332,7 @@ elif page == "Payment History":
 
 
 # ============================================================
-# LOANS - FATHER
+# LOANS - FATHER VIEW
 # ============================================================
 
 elif page == "Loans":
@@ -1245,19 +1359,23 @@ elif page == "Loans":
                 f"""
                 <div class="loan-card">
 
-                <h3>{loan["name"]}</h3>
+                    <h3>
+                        {loan["name"]}
+                    </h3>
 
-                <div class="small-text">
-                {loan["loan_type"].title()} Loan
-                </div>
+                    <div class="small-text">
+                        {loan["loan_type"].title()} Loan
+                    </div>
 
-                <br>
+                    <br>
 
-                <b>Remaining Principal</b>
+                    <div class="small-text">
+                        Remaining Principal
+                    </div>
 
-                <div class="amount">
-                ₹{summary["remaining"]:,.2f}
-                </div>
+                    <div class="amount">
+                        ₹{summary["remaining"]:,.2f}
+                    </div>
 
                 </div>
                 """,
